@@ -1,0 +1,25 @@
+# Dependencias
+node_modules/
+
+# Compilación TypeScript
+dist/
+
+# Salidas del scraper (datos, PDFs, logs, estado) — no se versionan
+output/
+
+# Logs sueltos
+*.log
+
+# Sistema operativo / editores
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Variables de entorno
+.env
+.env.local
+
+# Documentación interna (no se publica en el repo)
+SPEC.md
+GUIA_ESTUDIO.md
