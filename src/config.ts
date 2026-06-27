@@ -49,6 +49,15 @@ export interface Config {
   /** Si true, añade jitter aleatorio al backoff (evita "thundering herd"). */
   retryJitter: boolean;
 
+  // ─────────────────────────── Resiliencia de paginación ───────────────────────────
+  /**
+   * Nº de veces que se RECARGA la búsqueda completa cuando una página llega vacía
+   * pero el total inicial indica que aún debería haber resultados (vista vacía
+   * transitoria del servidor). Evita cortar la faceta antes de tiempo: solo se da
+   * por terminada cuando la página vacía coincide con el fin esperado según el total.
+   */
+  maxEmptyPageReloads: number;
+
   // ─────────────────────────── Extracción ───────────────────────────
   /**
    * Si true, dispara el modal "Ficha" por documento. Es la FUENTE PRINCIPAL de
@@ -89,7 +98,7 @@ export interface Config {
 export const config: Config = {
   // Alcance — por defecto, modo de desarrollo seguro.
   executionMode: 'FIRST_PAGE',
-  referenceFacet: { corte: 1, anio: 2024 }, // Corte Suprema, 2024
+  referenceFacet: { corte: 1, anio: 2025 }, // Corte Suprema, 2025
   allYears: [], // vacío => se autodetectan desde el formulario del sitio
   allCortes: [1, 2], // Suprema y Superior
 
@@ -106,6 +115,9 @@ export const config: Config = {
   retryBackoffBase: 1000,
   retryBackoffMaxDelay: 60_000,
   retryJitter: true,
+
+  // Resiliencia de paginación
+  maxEmptyPageReloads: 3,
 
   // Extracción
   fetchFichaModal: true,

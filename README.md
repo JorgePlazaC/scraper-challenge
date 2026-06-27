@@ -123,7 +123,7 @@ output/
 │  ├─ documents.ndjson     # 1 documento JSON por línea (incremental, resiliente)
 │  └─ documents.json       # array agregado, generado al finalizar
 ├─ pdfs/
-│  └─ <Corte>/<Año>/<uuid>.pdf
+│  └─ <Corte>/<Año>/<recurso>_<nroExpediente>_<fecha>_<uuid>.pdf
 ├─ state/
 │  ├─ checkpoint.json      # reanudación (faceta/página completada)
 │  └─ failed.ndjson        # documentos/descargas fallidas (reintentables)
@@ -156,18 +156,22 @@ listado, la **ficha completa** del modal y los metadatos del PDF:
   "pdf": {
     "downloadUrl": ".../ServletDescarga?uuid=9dc0ebac-...",
     "serverFilename": "Resolucion_11_20241228105201000545398.pdf",
-    "localPath": "pdfs/Suprema/2024/9dc0ebac-76b0-4207-906a-dd3b441483ad.pdf",
+    "localPath": "pdfs/Suprema/2024/Apelacion_007125-2023_2024-12-28_9dc0ebac-76b0-4207-906a-dd3b441483ad.pdf",
     "status": "downloaded", "bytes": 287810, "sha256": "...", "attempts": 1, "error": null
   },
   "_meta": { "facet": { "corte": 1, "anio": 2024 }, "page": 1, "rowIndex": 9, "scrapedAt": "..." }
 }
 ```
 
-**Nomenclatura de PDFs:** `<uuid>.pdf`. El `uuid` es **único y estable** (es la
-clave del servlet de descarga), por lo que la correlación JSON↔PDF es directa y
-sin colisiones. El `nroExpediente` **no** es único (un expediente puede tener varias
-resoluciones), así que no sirve como nombre de archivo; se conserva el nombre que
-sugiere el servidor en `pdf.serverFilename` por legibilidad.
+**Nomenclatura de PDFs:** `<recurso>_<nroExpediente>_<fecha>_<uuid>.pdf`
+(p.ej. `Casacion_012722-2021_2023-12-29_26ec07bf-ca63-46dd-802d-d5cddd52ea64.pdf`).
+Combina una parte **descriptiva** legible —recurso + nº de expediente + fecha
+`yyyy-mm-dd`, saneados (sin acentos ni caracteres problemáticos)— con el **`uuid`**
+como **identificador único** al final. El `uuid` garantiza la unicidad: el
+`nroExpediente` **no** es único por sí solo (un expediente puede tener varias
+resoluciones), por eso no basta como nombre. El `uuid` además mantiene la correlación
+directa JSON↔PDF (es la clave del servlet de descarga). También se conserva el nombre
+que sugiere el servidor en `pdf.serverFilename`.
 
 ---
 
@@ -183,6 +187,12 @@ sugiere el servidor en `pdf.serverFilename` por legibilidad.
   concurrencia de descargas (`concurrentPdfDownloads`).
 - **PDF corrupto / sesión caída**: se validan los *magic bytes* `%PDF-`; un 200 con
   HTML no se acepta como PDF.
+- **Vista vacía transitoria (paginación)**: si una página llega vacía pero el
+  **total** de la búsqueda inicial indica que aún deberían quedar resultados (cada
+  página trae 10), **no** se asume el fin: se **recarga la búsqueda** y se reintenta
+  esa página (`maxEmptyPageReloads`). La faceta solo se da por terminada cuando la
+  página vacía coincide con el fin esperado según el total. Evita cortar
+  prematuramente búsquedas de cientos de páginas por un fallo puntual del servidor.
 - **Reanudación**: `checkpoint.json` guarda la última página completada por faceta;
   la deduplicación por `uuid` evita reprocesar. Reejecutar retoma donde se quedó.
 - **Cola de fallidos**: con `resumeFailedDownloads`, al iniciar se reintentan las
@@ -240,7 +250,9 @@ pedidas por el desafío. El *cookie jar* se gestiona internamente (un único
 - **ViewState re-extraído** tras cada respuesta (regla de JSF) — sin esto, el
   segundo POST fallaría.
 - **NDJSON incremental + dedup por uuid**: resiliencia y reanudación a gran escala.
-- **`uuid` como clave de nombres y correlación**: estable y único.
+- **Nombre de PDF descriptivo + `uuid`**: parte legible (recurso/expediente/fecha)
+  para identificar el archivo de un vistazo, más el `uuid` que garantiza unicidad y
+  correlación directa con el JSON.
 
 ---
 
@@ -264,7 +276,7 @@ pedidas por el desafío. El *cookie jar* se gestiona internamente (un único
 | TypeScript, sin automatización de navegador           | ✅ axios + cheerio |
 | Navegar todo el sitio y descubrir la paginación        | ✅ facetas + dataScroller |
 | Extraer toda la información de cada documento (+ficha)  | ✅ resumen + modal (~35 campos) |
-| Descargar PDFs con nombre descriptivo                  | ✅ `<uuid>.pdf` + carpetas por faceta |
+| Descargar PDFs con nombre descriptivo                  | ✅ `<recurso>_<expediente>_<fecha>_<uuid>.pdf` + carpetas por faceta |
 | Detectar y manejar 429 con backoff exponencial         | ✅ `retry-policy.ts` |
 | Continuar con el siguiente si el error persiste        | ✅ cola de fallidos, no aborta |
 | Registrar documentos fallidos para reintentar          | ✅ `failed.ndjson` + `resumeFailedDownloads` |

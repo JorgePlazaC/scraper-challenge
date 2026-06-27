@@ -21,7 +21,8 @@ import type { FailedQueue } from '../persistence/failed-queue';
 import type { Checkpoint } from '../persistence/checkpoint';
 import type { DocumentRecord, Facet, Ficha, PdfInfo, RowSummary } from '../types';
 import { buildSearchSpace, maxPagesForMode } from './search-space';
-import { mapWithConcurrency } from '../utils/async';
+import { mapWithConcurrency, sleep } from '../utils/async';
+import { buildPdfFileName } from '../utils/naming';
 
 export interface OrchestratorDeps {
   session: JsfSession;
@@ -103,15 +104,21 @@ export class Orchestrator {
     });
 
     const startPage = Math.max(1, this.deps.checkpoint.lastPage(key) + 1);
+    let page1Rows: RowSummary[] | null = search.rows;
     for (let page = startPage; page <= lastPage; page++) {
-      const rows = page === 1 ? search.rows : await this.safeGoToPage(facet, page, key);
-      if (rows === null) break; // fallo de paginación: cortamos esta faceta
-      if (rows.length === 0) {
-        this.logger.warn(`Página ${page} vacía — fin de la faceta`);
+      const outcome = await this.fetchPageRows(facet, page, page1Rows, total, totalPages);
+      page1Rows = null;
+
+      if (outcome.kind === 'end') {
+        this.logger.info(`Página ${page} vacía y sin más resultados esperados — fin de la faceta`);
         break;
       }
+      if (outcome.kind === 'skip') {
+        // Página anómala irrecuperable: ya quedó registrada; seguimos con la siguiente.
+        continue;
+      }
 
-      await this.processPage(facet, page, rows);
+      await this.processPage(facet, page, outcome.rows);
       this.deps.checkpoint.savePage(key, page);
       this.stats.pages += 1;
     }
@@ -122,22 +129,83 @@ export class Orchestrator {
     }
   }
 
-  private async safeGoToPage(facet: Facet, page: number, key: string): Promise<RowSummary[] | null> {
+  /**
+   * Obtiene las filas de una página distinguiendo el **fin real** de la faceta de una
+   * **vista vacía transitoria**. Si la página llega vacía (o la petición falla) pero el
+   * total de la búsqueda inicial indica que aún debería haber resultados, recarga la
+   * búsqueda y reintenta antes de darla por terminada (el bug que esto corrige: una
+   * página 3 vacía cortaba una búsqueda que en realidad tenía cientos de páginas).
+   */
+  private async fetchPageRows(
+    facet: Facet,
+    page: number,
+    page1Rows: RowSummary[] | null,
+    total: number,
+    totalPages: number,
+  ): Promise<{ kind: 'rows'; rows: RowSummary[] } | { kind: 'end' } | { kind: 'skip' }> {
+    const rows = page === 1 && page1Rows ? page1Rows : await this.tryGoToPage(facet, page);
+    if (rows && rows.length > 0) return { kind: 'rows', rows };
+
+    // Llegó vacía o falló. ¿El total inicial indica que esta página DEBERÍA traer datos?
+    // Cada página trae 10 resultados (la última, el resto); por eso toda página dentro de
+    // `totalPages` debe tener contenido. Si no lo esperábamos, es el fin genuino.
+    const expectsContent = total > 0 && page <= totalPages;
+    if (!expectsContent) return { kind: 'end' };
+
+    this.logger.warn(
+      `Página ${page} vacía pero el total (${total} resultados ⇒ ${totalPages} págs.) ` +
+        `indica que debería traer resultados — recargando la búsqueda`,
+    );
+    const recovered = await this.recoverPage(facet, page);
+    if (recovered.length > 0) return { kind: 'rows', rows: recovered };
+
+    this.logger.error(
+      `Página ${page} sigue vacía tras ${this.config.maxEmptyPageReloads} recargas — se registra y se continúa`,
+    );
+    this.deps.failedQueue.add({
+      uuid: `page-${facet.corte}-${facet.anio}-${page}`,
+      nroExpediente: null,
+      stage: 'page',
+      reason: 'Página vacía persistente pese a que el total inicial indica resultados',
+      facet: { corte: facet.corte, anio: facet.anio },
+      page,
+      pdfUrl: null,
+      failedAt: new Date().toISOString(),
+    });
+    return { kind: 'skip' };
+  }
+
+  /** Recarga la búsqueda de la faceta y reintenta navegar a `page`. Devuelve [] si no recupera. */
+  private async recoverPage(facet: Facet, page: number): Promise<RowSummary[]> {
+    for (let attempt = 1; attempt <= this.config.maxEmptyPageReloads; attempt++) {
+      await sleep(this.config.retryBackoffBase * attempt);
+      try {
+        const reload = await this.deps.searchClient.search(facet);
+        const rows = page === 1 ? reload.rows : await this.deps.searchClient.goToPage(page);
+        if (rows.length > 0) {
+          this.logger.info(
+            `Recuperada la página ${page} (${rows.length} resultados) tras recarga ` +
+              `${attempt}/${this.config.maxEmptyPageReloads}`,
+          );
+          return rows;
+        }
+        this.logger.warn(`Recarga ${attempt}/${this.config.maxEmptyPageReloads}: la página ${page} sigue vacía`);
+      } catch (error) {
+        this.logger.warn(`Recarga ${attempt}/${this.config.maxEmptyPageReloads} de la página ${page} falló`, {
+          error: (error as Error).message,
+        });
+      }
+    }
+    return [];
+  }
+
+  /** Navega a una página; devuelve null si la petición lanza excepción (red/JSF). */
+  private async tryGoToPage(facet: Facet, page: number): Promise<RowSummary[] | null> {
     try {
       return await this.deps.searchClient.goToPage(page);
     } catch (error) {
-      this.logger.error(`Fallo paginando a p${page} en ${facet.corteNombre}/${facet.anio}`, {
+      this.logger.warn(`Error paginando a p${page} en ${facet.corteNombre}/${facet.anio}`, {
         error: (error as Error).message,
-      });
-      this.deps.failedQueue.add({
-        uuid: `page-${key}-${page}`,
-        nroExpediente: null,
-        stage: 'page',
-        reason: (error as Error).message,
-        facet: { corte: facet.corte, anio: facet.anio },
-        page,
-        pdfUrl: null,
-        failedAt: new Date().toISOString(),
       });
       return null;
     }
@@ -197,7 +265,13 @@ export class Orchestrator {
     doc: DocumentRecord,
     row: RowSummary,
   ): Promise<void> {
-    const dest = this.pdfDest(facet.corteNombre, facet.anio, row.uuid);
+    const fileName = buildPdfFileName({
+      recurso: row.recurso,
+      nroExpediente: row.nroExpediente,
+      fechaResolucion: row.fechaResolucion,
+      uuid: row.uuid,
+    });
+    const dest = this.pdfDest(facet.corteNombre, facet.anio, fileName);
     try {
       const result = await this.deps.pdfDownloader.download(row.uuid, dest);
       doc.pdf = {
@@ -247,7 +321,13 @@ export class Orchestrator {
     await mapWithConcurrency(pdfFailures, this.config.concurrentPdfDownloads, async (entry) => {
       const doc = byUuid.get(entry.uuid);
       if (!doc) return;
-      const dest = this.pdfDest(doc.corte, doc.anio, doc.uuid);
+      const fileName = buildPdfFileName({
+        recurso: doc.recurso,
+        nroExpediente: doc.nroExpediente,
+        fechaResolucion: doc.fechaResolucion,
+        uuid: doc.uuid,
+      });
+      const dest = this.pdfDest(doc.corte, doc.anio, fileName);
       try {
         const result = await this.deps.pdfDownloader.download(doc.uuid, dest);
         doc.pdf = {
@@ -313,8 +393,8 @@ export class Orchestrator {
     };
   }
 
-  private pdfDest(corteNombre: string, anio: number, uuid: string): string {
-    return path.join(this.deps.pdfsDir, corteNombre, String(anio), `${uuid}.pdf`);
+  private pdfDest(corteNombre: string, anio: number, fileName: string): string {
+    return path.join(this.deps.pdfsDir, corteNombre, String(anio), fileName);
   }
 
   private relPath(absolute: string): string {
