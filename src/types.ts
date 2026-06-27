@@ -130,7 +130,7 @@ export interface DocumentRecord {
 export interface FailedEntry {
   uuid: string;
   nroExpediente: string | null;
-  stage: 'ficha' | 'pdf' | 'page';
+  stage: 'ficha' | 'pdf' | 'page' | 'search';
   reason: string;
   facet: { corte: CorteId; anio: number };
   page: number;

@@ -193,6 +193,14 @@ que sugiere el servidor en `pdf.serverFilename`.
   esa página (`maxEmptyPageReloads`). La faceta solo se da por terminada cuando la
   página vacía coincide con el fin esperado según el total. Evita cortar
   prematuramente búsquedas de cientos de páginas por un fallo puntual del servidor.
+- **Búsqueda de faceta vacía/fallida (modo `ALL`)**: el sitio también devuelve `0`
+  resultados o `500` de forma **espuria** en el POST de búsqueda inicial. Por eso una
+  búsqueda que falla o devuelve `0` se **recarga** hasta `maxEmptySearchReloads` veces
+  (cada reintento reinicia sesión + ViewState). Una faceta que tras los reintentos
+  sigue en `0` se trata como vacía y **nunca se marca como completada** (se re-verifica
+  en cada ejecución), de modo que un `0` espurio no la omite para siempre. Si la
+  búsqueda falla de forma persistente, se registra en `failed.ndjson` y el recorrido
+  continúa con la siguiente faceta.
 - **Reanudación**: `checkpoint.json` guarda la última página completada por faceta;
   la deduplicación por `uuid` evita reprocesar. Reejecutar retoma donde se quedó.
 - **Cola de fallidos**: con `resumeFailedDownloads`, al iniciar se reintentan las

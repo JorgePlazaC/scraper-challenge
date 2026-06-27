@@ -57,6 +57,15 @@ export interface Config {
    * por terminada cuando la página vacía coincide con el fin esperado según el total.
    */
   maxEmptyPageReloads: number;
+  /**
+   * Nº de veces que se RECARGA la BÚSQUEDA de una faceta cuando su POST falla
+   * (500/timeout persistente) o devuelve 0 resultados de forma espuria. Cada reintento
+   * re-ejecuta la búsqueda completa (nuevo `inicio.xhtml` → nuevo ViewState → nuevo POST),
+   * lo que recupera fallos por estado de sesión. Hermano de `maxEmptyPageReloads`, pero a
+   * nivel de faceta. Una faceta que tras estos reintentos sigue en 0 se trata como vacía y
+   * NO se marca como completada (se re-verifica en cada ejecución).
+   */
+  maxEmptySearchReloads: number;
 
   // ─────────────────────────── Extracción ───────────────────────────
   /**
@@ -98,7 +107,7 @@ export interface Config {
 export const config: Config = {
   // Alcance — por defecto, modo de desarrollo seguro.
   executionMode: 'FIRST_PAGE',
-  referenceFacet: { corte: 1, anio: 2025 }, // Corte Suprema, 2025
+  referenceFacet: { corte: 1, anio: 2026 }, // Corte Suprema, 2026
   allYears: [], // vacío => se autodetectan desde el formulario del sitio
   allCortes: [1, 2], // Suprema y Superior
 
@@ -118,6 +127,7 @@ export const config: Config = {
 
   // Resiliencia de paginación
   maxEmptyPageReloads: 3,
+  maxEmptySearchReloads: 3,
 
   // Extracción
   fetchFichaModal: true,

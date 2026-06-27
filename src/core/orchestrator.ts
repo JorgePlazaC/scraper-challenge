@@ -13,7 +13,7 @@ import * as path from 'path';
 import { PAGE_SIZE, type Config } from '../config';
 import type { Logger } from '../logging/logger';
 import type { JsfSession } from '../http/jsf-session';
-import type { SearchClient } from '../scraping/search-client';
+import type { SearchClient, SearchResult } from '../scraping/search-client';
 import type { FichaClient } from '../scraping/ficha-client';
 import type { PdfDownloader } from '../scraping/pdf-downloader';
 import type { JsonStore } from '../persistence/json-store';
@@ -82,19 +82,36 @@ export class Orchestrator {
       return;
     }
 
-    let search;
-    try {
-      search = await this.deps.searchClient.search(facet, inicioHtml);
-    } catch (error) {
-      this.logger.error(`Búsqueda fallida en ${facet.corteNombre}/${facet.anio}`, {
-        error: (error as Error).message,
+    const search = await this.searchWithRecovery(facet, inicioHtml);
+    if (search === null) {
+      this.logger.error(
+        `Búsqueda fallida en ${facet.corteNombre}/${facet.anio} tras ${this.config.maxEmptySearchReloads} ` +
+          `recargas — se registra y se reintentará en otra ejecución`,
+      );
+      this.deps.failedQueue.add({
+        uuid: `search-${key}`,
+        nroExpediente: null,
+        stage: 'search',
+        reason: 'La búsqueda de la faceta falló de forma persistente',
+        facet: { corte: facet.corte, anio: facet.anio },
+        page: 0,
+        pdfUrl: null,
+        failedAt: new Date().toISOString(),
       });
-      return;
+      return; // sin markFacetDone → se reintenta en la próxima corrida
     }
 
     this.stats.facets += 1;
     const total = search.total ?? 0;
-    const totalPages = total > 0 ? Math.ceil(total / PAGE_SIZE) : search.rows.length > 0 ? Infinity : 0;
+
+    // Faceta genuinamente sin resultados (0 confirmado tras reintentos): NO se marca como
+    // completada, para re-verificarla en cada ejecución (protege contra un 0 espurio del sitio).
+    if (total === 0 && search.rows.length === 0) {
+      this.logger.info(`Faceta ${facet.corteNombre}/${facet.anio} sin resultados — nada que descargar`);
+      return;
+    }
+
+    const totalPages = total > 0 ? Math.ceil(total / PAGE_SIZE) : Infinity;
     const lastPage = Math.min(maxPagesForMode(this.config.executionMode), totalPages);
 
     this.logger.info(`Faceta ${facet.corteNombre}/${facet.anio}`, {
@@ -127,6 +144,50 @@ export class Orchestrator {
     if (Number.isFinite(totalPages) && lastPage >= totalPages) {
       this.deps.checkpoint.markFacetDone(key);
     }
+  }
+
+  /**
+   * Ejecuta la búsqueda de una faceta con recuperación. El sitio devuelve 0/500
+   * transitorios también en la BÚSQUEDA inicial (no solo al paginar): se reintenta
+   * recargando la búsqueda completa (nuevo inicio → nuevo ViewState → nuevo POST) si
+   * lanza excepción o si devuelve 0 resultados de forma espuria.
+   *
+   * Devuelve: el primer resultado CON contenido; o, si todos los intentos dan 0, ese
+   * resultado vacío (faceta genuinamente sin resultados); o `null` si todos lanzaron.
+   */
+  private async searchWithRecovery(facet: Facet, inicioHtml?: string): Promise<SearchResult | null> {
+    const maxAttempts = 1 + this.config.maxEmptySearchReloads;
+    let lastEmpty: SearchResult | null = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        // Solo el 1er intento reutiliza el inicioHtml del bootstrap; los reintentos recargan.
+        const result = await this.deps.searchClient.search(facet, attempt === 1 ? inicioHtml : undefined);
+        if ((result.total ?? 0) > 0 || result.rows.length > 0) {
+          if (attempt > 1) {
+            this.logger.info(
+              `Búsqueda de ${facet.corteNombre}/${facet.anio} recuperada en el intento ${attempt}/${maxAttempts}`,
+            );
+          }
+          return result; // tiene contenido
+        }
+        lastEmpty = result; // respuesta limpia con 0 resultados (posible vacío genuino o espurio)
+        if (attempt < maxAttempts) {
+          this.logger.warn(
+            `Búsqueda de ${facet.corteNombre}/${facet.anio} devolvió 0 resultados — reverificando (${attempt}/${maxAttempts})`,
+          );
+          await sleep(this.config.retryBackoffBase * attempt);
+        }
+      } catch (error) {
+        this.logger.warn(`Búsqueda de ${facet.corteNombre}/${facet.anio} falló (${attempt}/${maxAttempts})`, {
+          error: (error as Error).message,
+        });
+        if (attempt < maxAttempts) await sleep(this.config.retryBackoffBase * attempt);
+      }
+    }
+    // Agotados los intentos: si alguno respondió limpio con 0 → vacío genuino; si todos
+    // lanzaron, `lastEmpty` sigue null → fallo persistente.
+    return lastEmpty;
   }
 
   /**
